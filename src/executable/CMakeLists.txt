@@ -15,10 +15,13 @@ conan_cmake_run(
 find_package(Vulkan)
 
 set(SOURCES 
-    main.cpp)
+    main.cpp
+)
 add_executable(Chess ${SOURCES})
 target_link_libraries(Chess 
+    PUBLIC
     Vulkan::Vulkan 
     CONAN_PKG::glfw 
-    CONAN_PKG::vkfw)
+    CONAN_PKG::vkfw
+)
 

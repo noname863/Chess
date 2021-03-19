@@ -2,6 +2,9 @@
 #include <vkfw/vkfw.hpp>
 #include <vulkan/vulkan.hpp>
 #include <cassert>
+#include <initializer_list>
+#include <iostream>
+#include <set>
 
 void fassert(bool condition, const char * message)
 {
@@ -28,6 +31,24 @@ void criticalVulkanAssert(vk::Result received, std::string message)
 {
     criticalAssertEqual(received, vk::Result::eSuccess, std::move(message));
 }
+
+struct FamilyIndeces
+{
+    FamilyIndeces() = default;
+    FamilyIndeces(std::initializer_list<uint32_t> list)
+    {
+        for (uint32_t number : list)
+        {
+            if (std::find(indexes.begin(), indexes.end(), number) == indexes.end())
+            {
+                indexes.push_back(number);
+            }
+        }
+    }
+    FamilyIndeces(const FamilyIndeces&) = default;
+    FamilyIndeces(FamilyIndeces&&) = default;
+    std::vector<uint32_t> indexes;
+};
 
 vkfw::UniqueWindow initWindow()
 {
@@ -76,33 +97,66 @@ vk::UniqueInstance createVkInstance()
 //     return result;
 // }
 
-std::pair<vk::PhysicalDevice, uint32_t> pickPhysicalDeviceAndQueueFamily(vk::Instance& instance)
+std::pair<vk::PhysicalDevice, FamilyIndeces>
+pickPhysicalDeviceAndQueueFamily(vk::Instance& instance, vk::SurfaceKHR& surface)
 {
     auto[result, physicalDevices] = instance.enumeratePhysicalDevices();
     criticalVulkanAssert(result, "error enumerating phisical devices");
     fassert(physicalDevices.size() != 0, "no physical devices found");
     for (auto& physicalDevice : physicalDevices)
     {
+        std::cout << physicalDevices.front().getProperties().deviceName << std::endl;
         auto queueFamiliesProperties = physicalDevice.getQueueFamilyProperties();
+        bool surfaceSupported;
+        bool graphicsSupported;
+        uint32_t indexSurfaceSupported = std::numeric_limits<uint32_t>::max();
+        uint32_t indexGraphicsSupported = std::numeric_limits<uint32_t>::max();
         for (uint32_t i = 0; i < queueFamiliesProperties.size(); ++i)
         {
-            if (queueFamiliesProperties[i].queueFlags & vk::QueueFlagBits::eGraphics)
+            auto[result, value] = physicalDevice.getSurfaceSupportKHR(i, surface);
+            criticalVulkanAssert(result, "error in checking support of surface in physical device");
+            surfaceSupported = value;
+            graphicsSupported = 
+                (queueFamiliesProperties[i].queueFlags & vk::QueueFlagBits::eGraphics) ==
+                vk::QueueFlagBits::eGraphics; 
+            if (surfaceSupported && graphicsSupported)
             {
-                return {physicalDevice, i};
+                return {physicalDevice, FamilyIndeces({i})};
             }
+            else
+            {
+                if (surfaceSupported)
+                {
+                    indexSurfaceSupported = i;
+                }
+                if (graphicsSupported)
+                {
+                    indexGraphicsSupported = i;
+                }
+            }
+        }
+        if (indexGraphicsSupported < queueFamiliesProperties.size() &&
+            indexSurfaceSupported < queueFamiliesProperties.size())
+        {
+            return {physicalDevice, FamilyIndeces{indexGraphicsSupported, indexSurfaceSupported}};
         }
     }
     fassert(false, "no sutable device found");
     return {};
 }
 
-vk::UniqueDevice createDevice(vk::PhysicalDevice physicalDevice, uint32_t queueFamily)
+vk::UniqueDevice createDevice(vk::PhysicalDevice physicalDevice, FamilyIndeces queueFamilyIndeces)
 {
     float queuePriority = 1.0f;
-    vk::DeviceQueueCreateInfo queueCreateInfo({}, queueFamily, 1, &queuePriority);
+    std::vector<vk::DeviceQueueCreateInfo> queueInfos;
+    queueInfos.reserve(queueFamilyIndeces.indexes.size());
+    for (uint32_t index : queueFamilyIndeces.indexes)
+    {
+        queueInfos.push_back(vk::DeviceQueueCreateInfo({}, index, 1, &queuePriority));
+    }
     // default zero
     vk::PhysicalDeviceFeatures deviceFeatures{};
-    vk::DeviceCreateInfo deviceCreateInfo({}, 1, &queueCreateInfo);
+    vk::DeviceCreateInfo deviceCreateInfo({}, queueInfos.size(), queueInfos.data());
     auto[result, device] = physicalDevice.createDeviceUnique(deviceCreateInfo);
     criticalVulkanAssert(result, "failed to create logical device");
     return std::move(device);
@@ -113,8 +167,12 @@ int main()
     criticalVkfwAssert(vkfw::init(), "error in glfw init");
     vkfw::UniqueWindow mainWindow = initWindow();
     vk::UniqueInstance instance = createVkInstance();
-    auto [physicalDevice, queueFamilyIndex] =
-        pickPhysicalDeviceAndQueueFamily(instance.get());
+    vk::UniqueSurfaceKHR surface = vkfw::createWindowSurfaceUnique(
+            instance.get(), mainWindow.get());
+    auto [physicalDevice, queueFamilyIndeces] =
+        pickPhysicalDeviceAndQueueFamily(instance.get(), surface.get());
+    vk::UniqueDevice device = createDevice(physicalDevice, queueFamilyIndeces);
+
     while (true)
     {
         auto[shouldCloseResult, shouldClose] = mainWindow->shouldClose();
