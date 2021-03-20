@@ -4,6 +4,7 @@
 #include <cassert>
 #include <initializer_list>
 #include <iostream>
+#include <fstream>
 #include <set>
 
 void fassert(bool condition, const char * message)
@@ -314,6 +315,60 @@ std::vector<vk::UniqueImageView> createImageViews(vk::Device& device,
         result.push_back(std::move(imageView));
     }
     return std::move(result);
+}
+
+std::vector<char> readFile(std::string filename)
+{
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+    fassert(file.is_open(), "failed to open file!");
+    std::vector<char> buffer(static_cast<size_t>(file.tellg()));
+    file.seekg(0);
+    file.read(buffer.data(), buffer.size());
+    
+    file.close();
+    return buffer;
+}
+
+vk::UniqueShaderModule createShaderModule(vk::Device& device, const std::vector<char>& code)
+{
+    vk::ShaderModuleCreateInfo createInfo({}, code.size(),
+            reinterpret_cast<const uint32_t*>(code.data()));
+    auto[result, shaderModule] = device.createShaderModuleUnique(createInfo);
+    criticalVulkanAssert(result, "failed to create shader");
+    return std::move(shaderModule);
+}
+
+void createGraphicPipeline(vk::Device& device, vk::Extent2D extent)
+{
+    auto vertShaderCode = readFile("shaders/shader.vert.spv");
+    auto fragShaderCode = readFile("shaders/shader.frag.spv");
+
+    vk::UniqueShaderModule vertShader = createShaderModule(device, vertShaderCode);
+    vk::UniqueShaderModule fragShader = createShaderModule(device, fragShaderCode);
+
+    vk::PipelineShaderStageCreateInfo vertShaderStageInfo({},
+            vk::ShaderStageFlagBits::eVertex, vertShader.get(), "main");
+    vk::PipelineShaderStageCreateInfo fragShaderStageInfo({},
+            vk::ShaderStageFlagBits::eFragment, fragShader.get(), "main");
+
+    vk::PipelineVertexInputStateCreateInfo vertexInputStageInfo({},
+            0, nullptr, 0, nullptr);
+
+    vk::PipelineInputAssemblyStateCreateInfo inputAssemplyStateInfo({},
+            vk::PrimitiveTopology::eTriangleList, false);
+
+    vk::Viewport viewport(0.0f, 0.0f, extent.width, extent.height, 0.0f, 1.0f);
+    vk::Rect2D scissor({0, 0}, extent);
+    vk::PipelineViewportStateCreateInfo viewportStateInfo({}, 
+            1, &viewport, 1, &scissor);
+
+    vk::PipelineRasterizationStateCreateInfo reasterizerInfo({},
+            false, false, vk::PolygonMode::eFill, vk::CullModeFlagBits::eBack,
+            vk::FrontFace::eClockwise, false, 0.0f, 0.0f, 0.0f);
+
+    vk::PipelineMultisampleStateCreateInfo multisamplingInfo({},
+            vk::SampleCountFlagBits::e1, false, 1.0f, nullptr, false, false);
 }
 
 int main()

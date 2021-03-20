@@ -1,6 +1,7 @@
 project(executable)
 
 include(conan)
+include(add_glsl_shader)
 
 conan_cmake_run(
     REQUIRES
@@ -20,6 +21,12 @@ set(SOURCES
     main.cpp
 )
 add_executable(Chess ${SOURCES})
+
+add_glsl_shaders(Chess 
+    shaders/shader.frag
+    shaders/shader.vert
+)
+
 target_link_libraries(Chess 
     PUBLIC
     Vulkan::Vulkan 
