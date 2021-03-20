@@ -84,7 +84,11 @@ std::vector<const char *> initListOfRequiredDeviceExtentions()
     std::vector<const char *> result{
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
-    std::sort(result.begin(), result.end());
+    std::sort(result.begin(), result.end(),
+            [](const char* str1, const char* str2)
+            {
+                return std::strcmp(str1, str2) < 0;
+            });
     return result;
 }
 
@@ -101,9 +105,17 @@ bool isRequiredDeviceExtentionsSupported(vk::PhysicalDevice physicalDevice)
     {
         extentionNames.push_back(extention.extensionName);
     }
+    std::sort(extentionNames.begin(), extentionNames.end(),
+            [](const char* str1, const char* str2)
+            {
+                return std::strcmp(str1, str2) < 0;
+            });
     return std::search(extentionNames.begin(), extentionNames.end(),
-            requiredDeviceExtentions.begin(), requiredDeviceExtentions.end()) != 
-            extentionNames.end();
+            requiredDeviceExtentions.begin(), requiredDeviceExtentions.end(),
+            [](const char* str1, const char* str2)
+            {
+                return std::strcmp(str1, str2) == 0;
+            }) != extentionNames.end();
 }
 
 std::optional<FamilyIndeces> getFamilyIndeces(vk::PhysicalDevice physicalDevice, vk::SurfaceKHR surface)
@@ -180,7 +192,7 @@ pickPhysicalDeviceAndQueueFamily(vk::Instance& instance, vk::SurfaceKHR& surface
             return {physicalDevice, optionalFamilyIndeces.value()};
         }
     }
-    fassert(false, "no sutable device found");
+    fassert(false, "no suitable device found");
     return {};
 }
 
@@ -252,7 +264,8 @@ vk::Extent2D getSwapExtent2D(vkfw::Window& window, const vk::SurfaceCapabilities
     }
 }
 
-vk::UniqueSwapchainKHR createSwapChain(
+std::tuple<vk::UniqueSwapchainKHR, vk::Format, vk::Extent2D> 
+createSwapChain(
         vk::PhysicalDevice& physicalDevice, vk::Device& device, FamilyIndeces familyIndeces,
         vkfw::Window& window, vk::SurfaceKHR& surface)
 {
@@ -281,7 +294,26 @@ vk::UniqueSwapchainKHR createSwapChain(
             capabilities.currentTransform, vk::CompositeAlphaFlagBitsKHR::eOpaque, presentMode, true, {});
     auto [createSwapChainResult, swapChain] = device.createSwapchainKHRUnique(createInfo);
     criticalVulkanAssert(createSwapChainResult, "failed to create swapchain");
-    return std::move(swapChain);
+    return std::make_tuple(std::move(swapChain), surfaceFormat.format, extent);
+}
+
+std::vector<vk::UniqueImageView> createImageViews(vk::Device& device, 
+        vk::SwapchainKHR& swapchain, vk::Format format, vk::Extent2D extent)
+{
+    auto[getSwapChainResult, swapchainImages] = device.getSwapchainImagesKHR(swapchain);
+    std::vector<vk::UniqueImageView> result;
+    result.reserve(swapchainImages.size());
+    for (auto& image : swapchainImages)
+    {
+        vk::ImageSubresourceRange subresourceRange(vk::ImageAspectFlagBits::eColor, 
+                0, 1, 0, 1);
+        vk::ImageViewCreateInfo createInfo({}, image, vk::ImageViewType::e2D,
+                format, {}, subresourceRange); 
+        auto [createViewResult, imageView] = device.createImageViewUnique(createInfo);
+        criticalVulkanAssert(createViewResult, "failed to create imageView for swapchain");
+        result.push_back(std::move(imageView));
+    }
+    return std::move(result);
 }
 
 int main()
@@ -294,7 +326,7 @@ int main()
     auto [physicalDevice, queueFamilyIndeces] =
         pickPhysicalDeviceAndQueueFamily(instance.get(), surface.get());
     vk::UniqueDevice device = createDevice(physicalDevice, queueFamilyIndeces);
-    vk::UniqueSwapchainKHR swapchain = createSwapChain(physicalDevice, device.get(), 
+    auto [swapchain, format, extent] = createSwapChain(physicalDevice, device.get(), 
             queueFamilyIndeces, mainWindow.get(), surface.get());
 
     while (true)

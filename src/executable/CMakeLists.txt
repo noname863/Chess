@@ -14,6 +14,8 @@ conan_cmake_run(
 
 find_package(Vulkan)
 
+message(STATUS ${Vulkan_GLSLC_EXECUTABLE})
+
 set(SOURCES 
     main.cpp
 )
