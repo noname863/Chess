@@ -339,7 +339,25 @@ vk::UniqueShaderModule createShaderModule(vk::Device& device, const std::vector<
     return std::move(shaderModule);
 }
 
-void createGraphicPipeline(vk::Device& device, vk::Extent2D extent)
+vk::UniqueRenderPass createRenderPass(vk::Device& device, vk::Format swapChainImageFormat)
+{
+    vk::AttachmentDescription colorAttachment({}, 
+            swapChainImageFormat, vk::SampleCountFlagBits::e1, 
+            vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eStore,
+            vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
+            vk::ImageLayout::eUndefined, vk::ImageLayout::ePresentSrcKHR);
+    vk::AttachmentReference colorAttachmentRef(0, vk::ImageLayout::eColorAttachmentOptimal);
+    vk::SubpassDescription subpassDescription({},
+        vk::PipelineBindPoint::eGraphics, 0, nullptr, 1, &colorAttachmentRef);
+    vk::RenderPassCreateInfo renderPassCreateInfo({},
+            1, &colorAttachment, 1, &subpassDescription);
+    auto[creationResult, renderPass] = device.createRenderPassUnique(renderPassCreateInfo);
+    criticalVulkanAssert(creationResult, "failed to create renderPass");
+    return std::move(renderPass);
+}
+
+std::tuple<vk::UniquePipeline , vk::UniquePipelineLayout>
+createGraphicPipeline(vk::Device& device, vk::RenderPass& renderPass, vk::Extent2D extent)
 {
     auto vertShaderCode = readFile("shaders/shader.vert.spv");
     auto fragShaderCode = readFile("shaders/shader.frag.spv");
@@ -352,23 +370,92 @@ void createGraphicPipeline(vk::Device& device, vk::Extent2D extent)
     vk::PipelineShaderStageCreateInfo fragShaderStageInfo({},
             vk::ShaderStageFlagBits::eFragment, fragShader.get(), "main");
 
+    auto shaderStageInfos[] = {vertShaderStageInfo, fragShaderStageInfo};
+
     vk::PipelineVertexInputStateCreateInfo vertexInputStageInfo({},
             0, nullptr, 0, nullptr);
 
     vk::PipelineInputAssemblyStateCreateInfo inputAssemplyStateInfo({},
             vk::PrimitiveTopology::eTriangleList, false);
 
-    vk::Viewport viewport(0.0f, 0.0f, extent.width, extent.height, 0.0f, 1.0f);
+    float extentSideSize;
+    float viewportX;
+    float viewportY;
+    if (extent.width < extent.height)
+    {
+        extentSideSize = static_cast<float>(extent.width);
+        viewportX = 0.0f;
+        viewportY = (static_cast<float>(extent.height) - extentSideSize) / 2;
+    }
+    else
+    {
+        extentSideSize = static_cast<float>(extent.height);
+        viewportX = (static_cast<float>(extent.width) - extentSideSize) / 2;
+        viewportY = 0.0f;
+    }
+
+    vk::Viewport viewport(viewportX, viewportY, extentSideSize, extentSideSize, 0.0f, 1.0f);
     vk::Rect2D scissor({0, 0}, extent);
     vk::PipelineViewportStateCreateInfo viewportStateInfo({}, 
             1, &viewport, 1, &scissor);
 
-    vk::PipelineRasterizationStateCreateInfo reasterizerInfo({},
+    vk::PipelineRasterizationStateCreateInfo rasterizerInfo({},
             false, false, vk::PolygonMode::eFill, vk::CullModeFlagBits::eBack,
             vk::FrontFace::eClockwise, false, 0.0f, 0.0f, 0.0f);
 
     vk::PipelineMultisampleStateCreateInfo multisamplingInfo({},
             vk::SampleCountFlagBits::e1, false, 1.0f, nullptr, false, false);
+
+    vk::PipelineColorBlendAttachmentState colorBlendAttachment(false,
+            vk::BlendFactor::eOne, vk::BlendFactor::eZero, 
+            vk::BlendOp::eAdd, vk::BlendFactor::eOne, vk::BlendFactor::eZero,
+            vk::BlendOp::eAdd);
+
+    vk::PipelineColorBlendStateCreateInfo colorBlendStateCreateInfo({}, 
+            false, vk::LogicOp::eCopy, 1, &colorBlendAttachment,
+            {0.0f, 0.0f, 0.0f, 0.0f});
+
+    vk::DynamicState dynamicStates[] = {vk::DynamicState::eViewport, vk::DynamicState::eLineWidth};
+    vk::PipelineDynamicStateCreateInfo dynamicStateInfo({}, 2, dynamicStates);
+
+    // all zeros
+    vk::PipelineLayoutCreateInfo pipelineLayoutInfo;
+    auto [pipelineLayoutCreateResult, pipelineLayout] = 
+        device.createPipelineLayoutUnique(pipelineLayoutInfo);
+
+    criticalVulkanAssert(pipelineLayoutCreateResult, "error creating pipeline layout");
+
+    vk::GraphicsPipelineCreateInfo pipelineInfo({}, 2, 
+            shaderStageInfos, &vertexInputStageInfo, &inputAssemplyStateInfo, 
+            &viewportStateInfo, &rasterizerInfo, &multisamplingInfo, 
+            nullptr, &colorBlendStateCreateInfo, &dynamicStateInfo, 
+            pipelineLayout.get(), renderPass, 0, {}, -1);
+
+    auto [graphicPipelineCreateResult, graphicPipeline] = 
+        device.createGraphicsPipelineUnique({}, pipelineInfo);
+
+    criticalVulkanAssert(graphicPipelineCreateResult, "failed to create graphic pipeline");
+
+    return std::make_tuple(std::move(graphicPipeline), std::move(pipelineLayout));
+}
+
+std::vector<vk::UniqueFramebuffer>
+createFramebuffers(vk::Device& device, vk::RenderPass& renderPass, 
+        vk::Extent2D extent, const std::vector<vk::UniqueImageView>& imageViews)
+{
+    std::vector<vk::UniqueFramebuffer> result;
+    result.reserve(imageViews.size());
+    for (const auto& imageView : imageViews)
+    {
+        vk::FramebufferCreateInfo createInfo({}, renderPass, 1,
+                &imageView.get(), extent.width, extent.height, 1);
+
+        auto [createFramebufferResult, framebuffer] =
+            device.createFramebufferUnique(createInfo);
+        criticalVulkanAssert(createFramebufferResult, "failed to create framebuffer");
+        result.push_back(std::move(framebuffer));
+    }
+    return std::move(result);
 }
 
 int main()
@@ -383,6 +470,13 @@ int main()
     vk::UniqueDevice device = createDevice(physicalDevice, queueFamilyIndeces);
     auto [swapchain, format, extent] = createSwapChain(physicalDevice, device.get(), 
             queueFamilyIndeces, mainWindow.get(), surface.get());
+    std::vector<vk::UniqueImageView> swapchainImageViews = createImageViews(
+            device.get(), swapchain.get(), format, extent);
+    vk::UniqueRenderPass renderPass = createRenderPass(device.get(), format);
+    auto[graphicPipeline, pipelineLayout] = 
+        createGraphicPipeline(device.get(), renderPass.get(), extent);
+    std::vector<vk::UniqueFramebuffer> framebuffers =
+        createFramebuffers(device.get(), renderPass.get(), extent, swapchainImageViews);
 
     while (true)
     {
