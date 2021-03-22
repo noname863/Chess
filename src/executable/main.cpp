@@ -1,11 +1,19 @@
 #define VKFW_ASSERT_ON_RESULT(expr)
+#define VULKAN_HPP_ASSERT(expr)
 #include <vkfw/vkfw.hpp>
 #include <vulkan/vulkan.hpp>
 #include <cassert>
 #include <initializer_list>
 #include <iostream>
+#include <filesystem>
+#include <optional>
+#include <limits>
 #include <fstream>
 #include <set>
+
+std::filesystem::path executableFolder;
+
+constexpr bool enableVulkanDebug = true;
 
 void fassert(bool condition, const char * message)
 {
@@ -36,25 +44,28 @@ void criticalVulkanAssert(vk::Result received, std::string message)
 struct FamilyIndeces
 {
     FamilyIndeces() = default;
-    FamilyIndeces(std::initializer_list<uint32_t> list)
+    FamilyIndeces(uint32_t graphicsFamily, uint32_t presentationFamily) :
+        graphicsFamily(graphicsFamily),
+        presentationFamily(presentationFamily)
     {
-        for (uint32_t number : list)
+        indexes.push_back(graphicsFamily);
+        if (graphicsFamily != presentationFamily)
         {
-            if (std::find(indexes.begin(), indexes.end(), number) == indexes.end())
-            {
-                indexes.push_back(number);
-            }
+            indexes.push_back(presentationFamily);
         }
     }
     FamilyIndeces(const FamilyIndeces&) = default;
     FamilyIndeces(FamilyIndeces&&) = default;
     std::vector<uint32_t> indexes;
+    uint32_t graphicsFamily;
+    uint32_t presentationFamily;
+
 };
 
 vkfw::UniqueWindow initWindow()
 {
-    // criticalVkfwAssert(vkfw::setWindowHint(vkfw::OptionalWindowHint<vkfw::WindowHint::eResizable>{false}), 
-    //         "error setting resizable hint");
+    criticalVkfwAssert(vkfw::setWindowHint(vkfw::OptionalWindowHint<vkfw::WindowHint::eResizable>{false}), 
+            "error setting resizable hint");
     auto[result, window] = vkfw::createWindowUnique(800, 600, "Chess");
     criticalVkfwAssert(result, "error creating window");
     return std::move(window);
@@ -75,6 +86,48 @@ vk::UniqueInstance createVkInstance()
     vk::InstanceCreateInfo createInfo(
             {}, &appInfo, 0, nullptr, 
             glfwExtentionCount, glfwExtentions);
+    std::vector<const char*> validationLayers = 
+    {
+        "VK_LAYER_KHRONOS_validation",
+        "VK_LAYER_LUNARG_standard_validation",
+        // "VK_LAYER_LUNARG_api_dump"
+    };
+    auto [enumerateLayersResult, layersProperties] = vk::enumerateInstanceLayerProperties();
+    criticalVulkanAssert(enumerateLayersResult, "failed to get list of layers");
+    if constexpr (enableVulkanDebug)
+    {
+        // TODO: FIX THIS
+        //
+        // auto charStringCompare = [](const char* str1, const char* str2)
+        //         {
+        //             return std::strcmp(str1, str2) < 0;
+        //         };
+        // auto findPredicate = [](const vk::LayerProperties& prop, const char* str)
+        //         {
+        //             return std::strcmp(str, prop.layerName) == 0;
+        //         };
+        // std::sort(validationLayers.begin(), validationLayers.end(), charStringCompare);
+        // auto [enumerateLayersResult, layersProperties] = vk::enumerateInstanceLayerProperties();
+        // criticalVulkanAssert(enumerateLayersResult, "failed to get list of layers");
+        // std::sort(layersProperties.begin(), layersProperties.end(), 
+        //         [charStringCompare](const vk::LayerProperties& prop1, const vk::LayerProperties& prop2)
+        //         {
+        //             return charStringCompare(prop1.layerName, prop2.layerName);
+        //         });
+        // if (std::search(layersProperties.begin(), layersProperties.end(),
+        //         validationLayers.begin(), validationLayers.end(),
+        //         findPredicate) != layersProperties.end())
+        // {
+        // }
+        // else
+        // {
+        //     std::cout << "WARNING: validation layers requested, but some of them not found" << std::endl;
+        // }
+        // 
+        // std::vector<const char *> validationLayers;
+        createInfo.enabledLayerCount = validationLayers.size();
+        createInfo.ppEnabledLayerNames = validationLayers.data();
+    }
     auto[result, vkInstance] = vk::createInstanceUnique(createInfo);
     criticalVulkanAssert(result, "error creating vulkan instance");
     return std::move(vkInstance);
@@ -122,8 +175,11 @@ bool isRequiredDeviceExtentionsSupported(vk::PhysicalDevice physicalDevice)
 std::optional<FamilyIndeces> getFamilyIndeces(vk::PhysicalDevice physicalDevice, vk::SurfaceKHR surface)
 {
     auto queueFamiliesProperties = physicalDevice.getQueueFamilyProperties();
-    uint32_t indexSurfaceSupported = std::numeric_limits<uint32_t>::max();
-    uint32_t indexGraphicsSupported = std::numeric_limits<uint32_t>::max();
+    // std::numeric_limits wrapped in parenthesis, because it collides
+    // with macro max(a, b) in windows.h see
+    // https://github.com/microsoft/cppwinrt/issues/479
+    uint32_t indexSurfaceSupported = (std::numeric_limits<uint32_t>::max)();
+    uint32_t indexGraphicsSupported = (std::numeric_limits<uint32_t>::max)();
     for (uint32_t i = 0; i < queueFamiliesProperties.size(); ++i)
     {
         auto[result, value] = physicalDevice.getSurfaceSupportKHR(i, surface);
@@ -134,7 +190,7 @@ std::optional<FamilyIndeces> getFamilyIndeces(vk::PhysicalDevice physicalDevice,
             vk::QueueFlagBits::eGraphics; 
         if (surfaceSupported && graphicsSupported)
         {
-            return FamilyIndeces{i};
+            return FamilyIndeces{i, i};
         }
         else
         {
@@ -190,7 +246,7 @@ pickPhysicalDeviceAndQueueFamily(vk::Instance& instance, vk::SurfaceKHR& surface
         auto optionalFamilyIndeces = getFamilyIndeces(physicalDevice, surface);
         if (optionalFamilyIndeces.has_value())
         {
-            return {physicalDevice, optionalFamilyIndeces.value()};
+            return std::make_pair(physicalDevice, optionalFamilyIndeces.value());
         }
     }
     fassert(false, "no suitable device found");
@@ -208,8 +264,12 @@ vk::UniqueDevice createDevice(vk::PhysicalDevice physicalDevice, FamilyIndeces q
     }
     // default zero
     vk::PhysicalDeviceFeatures deviceFeatures{};
-    vk::DeviceCreateInfo deviceCreateInfo({}, queueInfos.size(), queueInfos.data(), 
-            0, nullptr, requiredDeviceExtentions.size(), requiredDeviceExtentions.data());
+
+    vk::DeviceCreateInfo deviceCreateInfo({}, 
+            static_cast<uint32_t>(queueInfos.size()), queueInfos.data(), 
+            0, nullptr, static_cast<uint32_t>(requiredDeviceExtentions.size()),
+            requiredDeviceExtentions.data(), &deviceFeatures);
+
     auto[result, device] = physicalDevice.createDeviceUnique(deviceCreateInfo);
     criticalVulkanAssert(result, "failed to create logical device");
     return std::move(device);
@@ -255,7 +315,7 @@ vk::Extent2D createNewExtent2D(vkfw::Window& window, const vk::SurfaceCapabiliti
 
 vk::Extent2D getSwapExtent2D(vkfw::Window& window, const vk::SurfaceCapabilitiesKHR capabilities)
 {
-    if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
+    if (capabilities.currentExtent.width != (std::numeric_limits<uint32_t>::max)())
     {
         return capabilities.currentExtent;
     }
@@ -314,10 +374,10 @@ std::vector<vk::UniqueImageView> createImageViews(vk::Device& device,
         criticalVulkanAssert(createViewResult, "failed to create imageView for swapchain");
         result.push_back(std::move(imageView));
     }
-    return std::move(result);
+    return result;
 }
 
-std::vector<char> readFile(std::string filename)
+std::vector<char> readFile(std::filesystem::path filename)
 {
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
@@ -349,8 +409,10 @@ vk::UniqueRenderPass createRenderPass(vk::Device& device, vk::Format swapChainIm
     vk::AttachmentReference colorAttachmentRef(0, vk::ImageLayout::eColorAttachmentOptimal);
     vk::SubpassDescription subpassDescription({},
         vk::PipelineBindPoint::eGraphics, 0, nullptr, 1, &colorAttachmentRef);
+    vk::SubpassDependency dependency(VK_SUBPASS_EXTERNAL, 0, vk::PipelineStageFlagBits::eColorAttachmentOutput, 
+            vk::PipelineStageFlagBits::eColorAttachmentOutput, {}, vk::AccessFlagBits::eColorAttachmentWrite);
     vk::RenderPassCreateInfo renderPassCreateInfo({},
-            1, &colorAttachment, 1, &subpassDescription);
+            1, &colorAttachment, 1, &subpassDescription, 1, &dependency);
     auto[creationResult, renderPass] = device.createRenderPassUnique(renderPassCreateInfo);
     criticalVulkanAssert(creationResult, "failed to create renderPass");
     return std::move(renderPass);
@@ -359,8 +421,9 @@ vk::UniqueRenderPass createRenderPass(vk::Device& device, vk::Format swapChainIm
 std::tuple<vk::UniquePipeline , vk::UniquePipelineLayout>
 createGraphicPipeline(vk::Device& device, vk::RenderPass& renderPass, vk::Extent2D extent)
 {
-    auto vertShaderCode = readFile("shaders/shader.vert.spv");
-    auto fragShaderCode = readFile("shaders/shader.frag.spv");
+    std::filesystem::path pathToShaders = executableFolder / "assets" / "shaders";
+    auto vertShaderCode = readFile(pathToShaders / "shader.vert.spv");
+    auto fragShaderCode = readFile(pathToShaders / "shader.frag.spv");
 
     vk::UniqueShaderModule vertShader = createShaderModule(device, vertShaderCode);
     vk::UniqueShaderModule fragShader = createShaderModule(device, fragShaderCode);
@@ -370,7 +433,8 @@ createGraphicPipeline(vk::Device& device, vk::RenderPass& renderPass, vk::Extent
     vk::PipelineShaderStageCreateInfo fragShaderStageInfo({},
             vk::ShaderStageFlagBits::eFragment, fragShader.get(), "main");
 
-    auto shaderStageInfos[] = {vertShaderStageInfo, fragShaderStageInfo};
+    vk::PipelineShaderStageCreateInfo shaderStageInfos[] =
+        {vertShaderStageInfo, fragShaderStageInfo};
 
     vk::PipelineVertexInputStateCreateInfo vertexInputStageInfo({},
             0, nullptr, 0, nullptr);
@@ -395,28 +459,36 @@ createGraphicPipeline(vk::Device& device, vk::RenderPass& renderPass, vk::Extent
     }
 
     vk::Viewport viewport(viewportX, viewportY, extentSideSize, extentSideSize, 0.0f, 1.0f);
+    // vk::Viewport viewport(0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f);
     vk::Rect2D scissor({0, 0}, extent);
     vk::PipelineViewportStateCreateInfo viewportStateInfo({}, 
             1, &viewport, 1, &scissor);
 
     vk::PipelineRasterizationStateCreateInfo rasterizerInfo({},
             false, false, vk::PolygonMode::eFill, vk::CullModeFlagBits::eBack,
-            vk::FrontFace::eClockwise, false, 0.0f, 0.0f, 0.0f);
+            vk::FrontFace::eClockwise, false, 0.0f, 0.0f, 0.0f, 1.0f);
 
     vk::PipelineMultisampleStateCreateInfo multisamplingInfo({},
-            vk::SampleCountFlagBits::e1, false, 1.0f, nullptr, false, false);
+            vk::SampleCountFlagBits::e1, false);
 
     vk::PipelineColorBlendAttachmentState colorBlendAttachment(false,
             vk::BlendFactor::eOne, vk::BlendFactor::eZero, 
             vk::BlendOp::eAdd, vk::BlendFactor::eOne, vk::BlendFactor::eZero,
-            vk::BlendOp::eAdd);
+            vk::BlendOp::eAdd, 
+            vk::ColorComponentFlagBits::eR |
+            vk::ColorComponentFlagBits::eG |
+            vk::ColorComponentFlagBits::eB |
+            vk::ColorComponentFlagBits::eA);
 
     vk::PipelineColorBlendStateCreateInfo colorBlendStateCreateInfo({}, 
             false, vk::LogicOp::eCopy, 1, &colorBlendAttachment,
             {0.0f, 0.0f, 0.0f, 0.0f});
 
-    vk::DynamicState dynamicStates[] = {vk::DynamicState::eViewport, vk::DynamicState::eLineWidth};
-    vk::PipelineDynamicStateCreateInfo dynamicStateInfo({}, 2, dynamicStates);
+    vk::DynamicState dynamicStates[] = {
+        // vk::DynamicState::eViewport, 
+        vk::DynamicState::eLineWidth
+    };
+    vk::PipelineDynamicStateCreateInfo dynamicStateInfo({}, 1, dynamicStates);
 
     // all zeros
     vk::PipelineLayoutCreateInfo pipelineLayoutInfo;
@@ -426,8 +498,8 @@ createGraphicPipeline(vk::Device& device, vk::RenderPass& renderPass, vk::Extent
     criticalVulkanAssert(pipelineLayoutCreateResult, "error creating pipeline layout");
 
     vk::GraphicsPipelineCreateInfo pipelineInfo({}, 2, 
-            shaderStageInfos, &vertexInputStageInfo, &inputAssemplyStateInfo, 
-            &viewportStateInfo, &rasterizerInfo, &multisamplingInfo, 
+            shaderStageInfos, &vertexInputStageInfo, &inputAssemplyStateInfo,
+            nullptr, &viewportStateInfo, &rasterizerInfo, &multisamplingInfo, 
             nullptr, &colorBlendStateCreateInfo, &dynamicStateInfo, 
             pipelineLayout.get(), renderPass, 0, {}, -1);
 
@@ -455,29 +527,176 @@ createFramebuffers(vk::Device& device, vk::RenderPass& renderPass,
         criticalVulkanAssert(createFramebufferResult, "failed to create framebuffer");
         result.push_back(std::move(framebuffer));
     }
-    return std::move(result);
+    return result;
 }
 
-int main()
+vk::UniqueCommandPool createCommandPool(vk::Device device, FamilyIndeces familyIndeces)
 {
+    vk::CommandPoolCreateInfo poolCreateInfo({}, familyIndeces.graphicsFamily);
+    auto [createCommandPoolResult, commandPool] = 
+        device.createCommandPoolUnique(poolCreateInfo);
+    return std::move(commandPool);
+}
+
+std::vector<vk::UniqueCommandBuffer> createCommandBuffers(vk::Device& device, vk::CommandPool& commandPool, vk::Pipeline& pipeline,
+        vk::RenderPass& renderPass, vk::Extent2D extent, const std::vector<vk::UniqueFramebuffer>& framebuffers)
+{
+    vk::CommandBufferAllocateInfo allocateInfo(commandPool, vk::CommandBufferLevel::ePrimary,
+            static_cast<uint32_t>(framebuffers.size()));
+
+    auto[allocateResult, commandBuffers] = device.allocateCommandBuffersUnique(allocateInfo);
+    criticalVulkanAssert(allocateResult, "failed to allocate commandBuffers");
+
+    for (size_t i = 0; i < commandBuffers.size(); ++i)
+    {
+        vk::CommandBufferBeginInfo beginInfo;
+        criticalVulkanAssert(commandBuffers[i]->begin(beginInfo), "failed to begin recording command buffer");
+
+        vk::ClearValue clearColor(std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f});
+        vk::Rect2D renderArea({0, 0}, extent);
+
+        vk::RenderPassBeginInfo renderPassInfo(
+                renderPass, framebuffers[i].get(), renderArea, 1, &clearColor);
+        
+        commandBuffers[i]->beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
+        commandBuffers[i]->bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+        commandBuffers[i]->draw(3, 1, 0, 0);
+        commandBuffers[i]->endRenderPass();
+        criticalVulkanAssert(commandBuffers[i]->end(), "error recording command buffers");
+    }
+
+    return std::move(commandBuffers);
+}
+
+std::tuple<
+    std::vector<vk::UniqueSemaphore>, 
+    std::vector<vk::UniqueSemaphore>,
+    std::vector<vk::UniqueFence>>
+createSyncObjects(vk::Device& device, size_t parallelFrames)
+{
+    std::vector<vk::UniqueSemaphore> imageAvailableSemaphores;
+    imageAvailableSemaphores.reserve(parallelFrames);
+    std::vector<vk::UniqueSemaphore> renderFinishedSemaphores;
+    renderFinishedSemaphores.reserve(parallelFrames);
+    std::vector<vk::UniqueFence> commandBufferFences;
+    commandBufferFences.reserve(parallelFrames);
+    for (size_t i = 0; i < parallelFrames; ++i)
+    {
+        auto[result1, imageAvailableSemaphore] = device.createSemaphoreUnique({});
+        criticalVulkanAssert(result1, "failed to create imageAvailableSemaphore");
+        imageAvailableSemaphores.push_back(std::move(imageAvailableSemaphore));
+        auto[result2, renderFinishedSemaphore] = device.createSemaphoreUnique({});
+        criticalVulkanAssert(result2, "failed to create renderFinishedSemaphore");
+        renderFinishedSemaphores.push_back(std::move(renderFinishedSemaphore));
+        auto[result3, commandBufferFence] = device.createFenceUnique({vk::FenceCreateFlagBits::eSignaled});
+        criticalVulkanAssert(result3, "failed to create commandBufferFence");
+        commandBufferFences.push_back(std::move(commandBufferFence));
+    }
+    return std::make_tuple(std::move(imageAvailableSemaphores), std::move(renderFinishedSemaphores), std::move(commandBufferFences));
+}
+
+bool drawFrame(
+        vk::Device& device,
+        vk::SwapchainKHR& swapchain,
+        vk::Queue& graphicQueue,
+        vk::Semaphore& imageAvailableSemaphore, 
+        vk::Semaphore& renderFinishedSemaphore, 
+        vk::Fence& commandBufferFence, 
+        std::vector<vk::Fence>& imageFences,
+        std::vector<vk::UniqueCommandBuffer>& commandBuffers)
+{
+    criticalVulkanAssert(device.waitForFences({commandBufferFence}, true, (std::numeric_limits<uint64_t>::max)()), 
+            "error waiting for entering drawFrame");
+    auto [acquringResult, imageIndex] = 
+        device.acquireNextImageKHR(swapchain, (std::numeric_limits<uint64_t>::max)(), imageAvailableSemaphore, {});
+    if (acquringResult == vk::Result::eErrorOutOfDateKHR || acquringResult == vk::Result::eSuboptimalKHR)
+    {
+        return true;
+    }
+    else
+    {
+        criticalVulkanAssert(acquringResult, "error acquring image from swapchain");
+    }
+    if (imageFences[imageIndex] != vk::Fence{})
+    {
+        criticalVulkanAssert(device.waitForFences({imageFences[imageIndex]}, true, (std::numeric_limits<uint64_t>::max)()), 
+                "error waiting for image release");
+    }
+    imageFences[imageIndex] = commandBufferFence;
+    // waiting for one stage
+    vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+    vk::SubmitInfo submitInfo(1, &imageAvailableSemaphore, &waitStage, 
+            1, &commandBuffers[imageIndex].get(), 1, &renderFinishedSemaphore);
+    criticalVulkanAssert(device.resetFences({commandBufferFence}), "error resetting command buffer fence");
+    criticalVulkanAssert(graphicQueue.submit(1, &submitInfo, commandBufferFence),"failed to submit commands to queue");
+    vk::PresentInfoKHR presentInfo(1, &renderFinishedSemaphore, 1, &swapchain, &imageIndex);
+    vk::Result presentResult = graphicQueue.presentKHR(presentInfo);
+    if (presentResult == vk::Result::eErrorOutOfDateKHR ||
+            presentResult == vk::Result::eSuboptimalKHR)
+    {
+        return true;
+    }
+    criticalVulkanAssert(presentResult, "failed to present image to Queue");
+    return false;
+}
+
+auto recreateSwapchain(vk::Device& device, FamilyIndeces queueFamilyIndeces, vkfw::Window& mainWindow,
+        vk::PhysicalDevice& physicalDevice, vk::SurfaceKHR& surface, vk::CommandPool& commandPool)
+{
+    auto [swapchain, format, extent] = createSwapChain(physicalDevice, device, 
+        queueFamilyIndeces, mainWindow, surface);
+    vk::UniqueRenderPass renderPass = createRenderPass(device, format);
+    auto[graphicPipeline, pipelineLayout] = 
+        createGraphicPipeline(device, renderPass.get(), extent);
+    std::vector<vk::UniqueImageView> swapchainImageViews = createImageViews(
+        device, swapchain.get(), format, extent);
+    std::vector<vk::UniqueFramebuffer> framebuffers =
+        createFramebuffers(device, renderPass.get(), extent, swapchainImageViews);
+    std::vector<vk::UniqueCommandBuffer> commandBuffers = 
+        createCommandBuffers(device, commandPool, graphicPipeline.get(),
+                renderPass.get(), extent, framebuffers);
+    return std::make_tuple(std::move(swapchain), format, extent, std::move(renderPass), std::move(graphicPipeline),
+            std::move(swapchainImageViews), std::move(framebuffers), std::move(commandBuffers));
+}
+
+int main(int argc, char* argv[])
+{
+    executableFolder = std::filesystem::absolute(std::filesystem::path(argv[0]).remove_filename());
     criticalVkfwAssert(vkfw::init(), "error in glfw init");
+    bool swapchainNeedRecreation = false;
     vkfw::UniqueWindow mainWindow = initWindow();
+    mainWindow->callbacks()->on_framebuffer_resize = 
+        [&swapchainNeedRecreation](const vkfw::Window& window, size_t, size_t)
+        {
+            swapchainNeedRecreation = true;
+        };
     vk::UniqueInstance instance = createVkInstance();
     vk::UniqueSurfaceKHR surface = vkfw::createWindowSurfaceUnique(
-            instance.get(), mainWindow.get());
+        instance.get(), mainWindow.get());
     auto [physicalDevice, queueFamilyIndeces] =
         pickPhysicalDeviceAndQueueFamily(instance.get(), surface.get());
     vk::UniqueDevice device = createDevice(physicalDevice, queueFamilyIndeces);
     auto [swapchain, format, extent] = createSwapChain(physicalDevice, device.get(), 
-            queueFamilyIndeces, mainWindow.get(), surface.get());
-    std::vector<vk::UniqueImageView> swapchainImageViews = createImageViews(
-            device.get(), swapchain.get(), format, extent);
+        queueFamilyIndeces, mainWindow.get(), surface.get());
     vk::UniqueRenderPass renderPass = createRenderPass(device.get(), format);
     auto[graphicPipeline, pipelineLayout] = 
         createGraphicPipeline(device.get(), renderPass.get(), extent);
+    std::vector<vk::UniqueImageView> swapchainImageViews = createImageViews(
+        device.get(), swapchain.get(), format, extent);
     std::vector<vk::UniqueFramebuffer> framebuffers =
         createFramebuffers(device.get(), renderPass.get(), extent, swapchainImageViews);
+    vk::UniqueCommandPool commandPool = createCommandPool(device.get(), queueFamilyIndeces);
+    std::vector<vk::UniqueCommandBuffer> commandBuffers = 
+        createCommandBuffers(device.get(), commandPool.get(), graphicPipeline.get(),
+                renderPass.get(), extent, framebuffers);
+    constexpr size_t inFlightFrames = 2;
+    auto[imageAvailableSemaphores, renderFinishedSemaphores, commandBufferFences] = 
+        createSyncObjects(device.get(), inFlightFrames);
 
+    vk::Queue graphicQueue = device->getQueue(queueFamilyIndeces.graphicsFamily, 0);
+    std::vector<vk::Fence> imageFences(framebuffers.size(), vk::Fence{});
+
+    size_t frameNumber = 0;
     while (true)
     {
         auto[shouldCloseResult, shouldClose] = mainWindow->shouldClose();
@@ -490,6 +709,25 @@ int main()
         {
             // actual main loop
             criticalVkfwAssert(vkfw::pollEvents(), "error in glfwPollEvents");
+            swapchainNeedRecreation |= drawFrame(device.get(), swapchain.get(), graphicQueue, imageAvailableSemaphores[frameNumber].get(),
+                    renderFinishedSemaphores[frameNumber].get(), commandBufferFences[frameNumber].get(), imageFences, commandBuffers);
+            if (swapchainNeedRecreation)
+            {
+                criticalVulkanAssert(device->waitIdle(), "error waiting for device");
+                // TODO: implement resource reuse
+                // order is important
+                commandBuffers.clear();
+                framebuffers.clear();
+                swapchainImageViews.clear();
+                renderPass.reset();
+                swapchain.reset();
+                std::tie(swapchain, format, extent, renderPass, graphicPipeline, swapchainImageViews, framebuffers, commandBuffers) =
+                    recreateSwapchain(device.get(), queueFamilyIndeces, 
+                            mainWindow.get(), physicalDevice, surface.get(), commandPool.get());
+            }
+            frameNumber = (frameNumber + 1) % inFlightFrames;
         }
     }
+
+    device->waitIdle();
 }
