@@ -18,4 +18,5 @@ endforeach()
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/src/executable)
-
+add_subdirectory(${CMAKE_SOURCE_DIR}/src/renderer)
+add_subdirectory(${CMAKE_SOURCE_DIR}/src/utils)
